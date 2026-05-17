@@ -869,12 +869,13 @@
         const physicsImages = [];
 
         const physicsConfig = {
-            gravity: 0.15,
-            friction: 0.96,
-            bounce: 0.4,
-            groundLevel: window.innerHeight - 50,
+            gravityX: 0,
+            gravityY: 0.15,
+            friction: 0.98, // 减小一点摩擦力使其更滑
+            bounce: 0.5,
+            groundLevel: window.innerHeight,
             collisionDistance: 55,
-            maxSpeed: 3,
+            maxSpeed: 8,
             minSpeed: 0.05,
             collisionForce: 0.15
         };
@@ -974,7 +975,8 @@
                     const imgObj = physicsImages[i];
                     const data = imgObj.physicsData;
                     
-                    data.vy += physicsConfig.gravity * deltaTime; // 重力
+                    data.vx += physicsConfig.gravityX * deltaTime; // X轴重力(受设备倾斜影响)
+                    data.vy += physicsConfig.gravityY * deltaTime; // Y轴重力
                     
                     data.vx *= Math.pow(physicsConfig.friction, deltaTime); // 空气阻力
                     data.vy *= Math.pow(physicsConfig.friction, deltaTime);
@@ -1040,6 +1042,7 @@
 
                 // 第三阶段：墙壁和地板碰撞检测，以及更新DOM
                 const screenWidth = window.innerWidth;
+                const screenHeight = window.innerHeight;
                 
                 for (let i = physicsImages.length - 1; i >= 0; i--) {
                     const imgObj = physicsImages[i];
@@ -1047,15 +1050,21 @@
                     const el = imgObj.element;
                     const radius = data.radius;
                     
-                    // 地板碰撞
-                    if (data.y > physicsConfig.groundLevel - radius) {
-                        data.y = physicsConfig.groundLevel - radius;
+                    // 地板碰撞 (改为了窗口最底部)
+                    if (data.y > screenHeight - radius) {
+                        data.y = screenHeight - radius;
                         data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
                         data.vx *= 0.8; // 触地摩擦力
                         
                         if (Math.abs(data.vy) < physicsConfig.minSpeed) {
                             data.vy = 0;
                         }
+                    }
+                    
+                    // 天花板碰撞 (防止被设备重力甩出屏幕上方)
+                    if (data.y < radius) {
+                        data.y = radius;
+                        data.vy = Math.abs(data.vy) * physicsConfig.bounce;
                     }
                     
                     // 左右墙壁碰撞
@@ -1099,7 +1108,7 @@
             if (enabled) {
                 document.querySelectorAll('.falling-image').forEach(imgElement => {
                     const currentTop = parseInt(imgElement.style.top) || -100;
-                    if (currentTop < physicsConfig.groundLevel) {
+                    if (currentTop < window.innerHeight) {
                         const radius = parseInt(imgElement.style.width) / 2 || 25;
                         const physicsData = {
                             x: (parseInt(imgElement.style.left) || 0) + radius,
@@ -1118,13 +1127,7 @@
                     }
                 });
                 
-                // 防止内存溢出：限制同屏物理元素的数量
-                while (physicsImages.length > 100) {
-                    const removed = physicsImages.shift();
-                    if (removed && removed.element && removed.element.parentNode) {
-                        removed.element.parentNode.removeChild(removed.element);
-                    }
-                }
+                // 移除数量限制的清理代码
                 
                 startPhysicsAnimation();
             } else {
@@ -1215,6 +1218,37 @@
 
             document.body.appendChild(imgElement);
 
+            if (physicsEnabled) {
+                // 如果启用了物理效果，生成图片时直接将其加入物理系统，不再使用独立下落动画
+                // 使其在空中就具有碰撞体积
+                const radius = imgWidth / 2;
+                imgElement.classList.add('physics-enabled');
+                
+                // 将坐标从左上角转换为中心点坐标
+                const startXCenter = startX + radius;
+                const startYCenter = currentY + radius;
+                
+                const physicsData = {
+                    x: startXCenter,
+                    y: startYCenter,
+                    vx: (Math.random() - 0.5) * 1.0,
+                    vy: fallSpeed * 0.5,
+                    rotation: currentRotation,
+                    radius: radius
+                };
+                
+                physicsImages.push({
+                    element: imgElement,
+                    physicsData: physicsData
+                });
+                
+                if (!physicsAnimationId) {
+                    startPhysicsAnimation();
+                }
+                
+                return; // 直接返回，不再执行下面的非物理动画
+            }
+
             const imageData = {
                 element: imgElement,
                 width: imgWidth,
@@ -1225,6 +1259,8 @@
             };
 
             function animate() {
+                if (physicsEnabled) return; // 防止中途切换时出现双重动画
+
                 currentY += fallSpeed;
                 currentRotation += spinSpeed;
 
@@ -1234,44 +1270,11 @@
                 imageData.currentY = currentY;
                 imageData.currentRotation = currentRotation;
 
-                if (currentY > window.innerHeight - 50) {
-                    if (physicsEnabled) {
-                        imgElement.classList.add('physics-enabled');
-                        
-                        const radius = imgWidth / 2;
-                        const physicsData = {
-                            x: (parseInt(imgElement.style.left) || startX) + radius,
-                            y: Math.min(currentY, physicsConfig.groundLevel) + radius,
-                            vx: (Math.random() - 0.5) * 2.0,
-                            vy: -Math.abs(fallSpeed) * 0.3 * physicsConfig.bounce,
-                            rotation: currentRotation,
-                            radius: radius
-                        };
-                        
-                        physicsImages.push({
-                            element: imgElement,
-                            physicsData: physicsData
-                        });
-                        
-                        // 防止内存溢出：限制同屏物理元素的数量
-                        if (physicsImages.length > 100) {
-                            const removed = physicsImages.shift();
-                            if (removed && removed.element && removed.element.parentNode) {
-                                removed.element.parentNode.removeChild(removed.element);
-                            }
-                        }
-                        
-                        if (!physicsAnimationId) {
-                            startPhysicsAnimation();
-                        }
-                        
-                        return;
-                    } else {
-                        if (currentY > window.innerHeight + 100) {
-                            document.body.removeChild(imgElement);
-                            return;
-                        }
+                if (currentY > window.innerHeight + 100) {
+                    if (imgElement.parentNode) {
+                        imgElement.parentNode.removeChild(imgElement);
                     }
+                    return;
                 }
 
                 requestAnimationFrame(animate);
@@ -1292,10 +1295,80 @@
                 }, 6000);
             }, 500);
         }
+        
+        function initDeviceOrientation() {
+            if (window.DeviceOrientationEvent) {
+                // 请求权限（针对iOS 13+）
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    // 通常需要在用户点击事件中调用，这里先尝试绑定
+                    document.body.addEventListener('click', function requestOrientation() {
+                        DeviceOrientationEvent.requestPermission()
+                            .then(permissionState => {
+                                if (permissionState === 'granted') {
+                                    bindOrientationEvent();
+                                }
+                            })
+                            .catch(console.error);
+                        document.body.removeEventListener('click', requestOrientation);
+                    }, { once: true });
+                } else {
+                    bindOrientationEvent();
+                }
+            }
+        }
+        
+        function bindOrientationEvent() {
+            window.addEventListener('deviceorientation', function(event) {
+                if (!physicsEnabled) return;
+                
+                // 获取设备的倾斜角度 (beta: 前后倾斜, gamma: 左右倾斜)
+                let beta = event.beta;   // -180 到 180
+                let gamma = event.gamma; // -90 到 90
+                
+                // 如果获取不到数据（例如桌面设备），则使用默认重力
+                if (beta === null || gamma === null) return;
+                
+                // 限制角度，避免过度反转
+                if (beta > 90) beta = 90;
+                if (beta < -90) beta = -90;
+                
+                // 根据设备倾斜计算重力方向和大小
+                const maxGravity = 0.5; // 最大重力加速度
+                
+                // 屏幕旋转适配
+                const orientation = window.orientation || 0;
+                
+                let gravityX = 0;
+                let gravityY = 0;
+                
+                if (orientation === 0) { // 竖屏
+                    gravityX = (gamma / 90) * maxGravity;
+                    gravityY = (beta / 90) * maxGravity;
+                } else if (orientation === 90) { // 横屏(向左转)
+                    gravityX = (beta / 90) * maxGravity;
+                    gravityY = -(gamma / 90) * maxGravity;
+                } else if (orientation === -90) { // 横屏(向右转)
+                    gravityX = -(beta / 90) * maxGravity;
+                    gravityY = (gamma / 90) * maxGravity;
+                } else if (orientation === 180) { // 倒竖屏
+                    gravityX = -(gamma / 90) * maxGravity;
+                    gravityY = -(beta / 90) * maxGravity;
+                }
+                
+                // 如果重力太小（设备接近平放），给一个默认向下的微小重力
+                if (Math.abs(gravityX) < 0.05 && Math.abs(gravityY) < 0.05) {
+                    gravityY = 0.15;
+                }
+                
+                physicsConfig.gravityX = gravityX;
+                physicsConfig.gravityY = gravityY;
+            });
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
             setTimeout(() => {
                 preloadImages();
+                initDeviceOrientation();
             }, 2000);
             
             const settingsButton = document.getElementById('settingsButton');
@@ -1338,7 +1411,7 @@
             document.querySelector('.rain-intensity-option[data-intensity="medium"]').classList.add('selected');
             
             window.addEventListener('resize', function() {
-                physicsConfig.groundLevel = window.innerHeight - 50;
+                physicsConfig.groundLevel = window.innerHeight;
             });
 
             document.addEventListener('visibilitychange', function() {
@@ -1382,7 +1455,7 @@
         });
 
         window.addEventListener('resize', function() {
-            physicsConfig.groundLevel = window.innerHeight - 50;
+            physicsConfig.groundLevel = window.innerHeight;
         });
     </script>
 </body>
