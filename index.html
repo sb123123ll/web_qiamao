@@ -174,9 +174,7 @@
             z-index: 10000;
             box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             transition: all 0.3s;
-            opacity: 0;
-            transform: translateY(-40px);
-            animation: slideDownFadeIn 1.0s cubic-bezier(0.18, 0.89, 0.32, 1.28) 2s forwards;
+            animation: slideDownFadeIn 1.0s cubic-bezier(0.18, 0.89, 0.32, 1.28) 2s both;
         }
         
         @keyframes slideUpFadeIn {
@@ -930,6 +928,167 @@
             }
         }
 
+        function restartFallingAnimation(imgElement, startX, startY, startRotation) {
+            const fallSpeed = fallSpeedMin + Math.random() * (fallSpeedMax - fallSpeedMin);
+            const spinSpeed = spinSpeedMin + Math.random() * (spinSpeedMax - spinSpeedMin);
+            let currentY = startY;
+            let currentRotation = startRotation;
+
+            function animate() {
+                if (physicsEnabled) return;
+                
+                currentY += fallSpeed;
+                currentRotation += spinSpeed;
+
+                imgElement.style.top = `${currentY}px`;
+                imgElement.style.transform = `rotate(${currentRotation}deg)`;
+
+                if (currentY > window.innerHeight + 100) {
+                    if (imgElement.parentNode) {
+                        imgElement.parentNode.removeChild(imgElement);
+                    }
+                    return;
+                }
+
+                requestAnimationFrame(animate);
+            }
+            requestAnimationFrame(animate);
+        }
+
+        function startPhysicsAnimation() {
+            if (!physicsEnabled || physicsAnimationId) return;
+
+            let lastTime = performance.now();
+
+            function updatePhysics(time) {
+                if (!physicsEnabled) {
+                    physicsAnimationId = null;
+                    return;
+                }
+                
+                const deltaTime = Math.min((time - lastTime) / 16.66, 3); // 限制最大增量避免穿模
+                lastTime = time;
+
+                // 第一阶段：更新位置和应用重力、空气阻力
+                for (let i = 0; i < physicsImages.length; i++) {
+                    const imgObj = physicsImages[i];
+                    const data = imgObj.physicsData;
+                    
+                    data.vy += physicsConfig.gravity * deltaTime; // 重力
+                    
+                    data.vx *= Math.pow(physicsConfig.friction, deltaTime); // 空气阻力
+                    data.vy *= Math.pow(physicsConfig.friction, deltaTime);
+
+                    data.x += data.vx * deltaTime;
+                    data.y += data.vy * deltaTime;
+                    
+                    // 根据水平速度旋转，增加物理真实感
+                    data.rotation += data.vx * 2 * deltaTime;
+                }
+
+                // 第二阶段：图标之间的互相碰撞检测与处理
+                for (let i = 0; i < physicsImages.length; i++) {
+                    for (let j = i + 1; j < physicsImages.length; j++) {
+                        const imgA = physicsImages[i];
+                        const imgB = physicsImages[j];
+                        
+                        // 计算两圆心之间的距离
+                        const dx = imgB.physicsData.x - imgA.physicsData.x;
+                        const dy = imgB.physicsData.y - imgA.physicsData.y;
+                        const distanceSq = dx * dx + dy * dy;
+                        
+                        // 碰撞距离阈值：两个半径之和
+                        const minDistance = imgA.physicsData.radius + imgB.physicsData.radius;
+                        
+                        if (distanceSq < minDistance * minDistance && distanceSq > 0) {
+                            const distance = Math.sqrt(distanceSq);
+                            const overlap = minDistance - distance;
+                            
+                            // 法向量
+                            const nx = dx / distance;
+                            const ny = dy / distance;
+                            
+                            // 分离重叠部分
+                            const separationX = nx * overlap * 0.5;
+                            const separationY = ny * overlap * 0.5;
+                            
+                            imgA.physicsData.x -= separationX;
+                            imgA.physicsData.y -= separationY;
+                            imgB.physicsData.x += separationX;
+                            imgB.physicsData.y += separationY;
+                            
+                            // 计算相对速度
+                            const kx = imgA.physicsData.vx - imgB.physicsData.vx;
+                            const ky = imgA.physicsData.vy - imgB.physicsData.vy;
+                            
+                            // 如果物体正在分离，则不处理速度交换
+                            const dotProduct = kx * nx + ky * ny;
+                            if (dotProduct > 0) {
+                                // 弹性碰撞恢复系数
+                                const restitution = 0.6;
+                                // 碰撞冲量（假设质量相等）
+                                const p = (1 + restitution) * dotProduct / 2.0;
+                                
+                                imgA.physicsData.vx -= p * nx;
+                                imgA.physicsData.vy -= p * ny;
+                                imgB.physicsData.vx += p * nx;
+                                imgB.physicsData.vy += p * ny;
+                            }
+                        }
+                    }
+                }
+
+                // 第三阶段：墙壁和地板碰撞检测，以及更新DOM
+                const screenWidth = window.innerWidth;
+                
+                for (let i = physicsImages.length - 1; i >= 0; i--) {
+                    const imgObj = physicsImages[i];
+                    const data = imgObj.physicsData;
+                    const el = imgObj.element;
+                    const radius = data.radius;
+                    
+                    // 地板碰撞
+                    if (data.y > physicsConfig.groundLevel - radius) {
+                        data.y = physicsConfig.groundLevel - radius;
+                        data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
+                        data.vx *= 0.8; // 触地摩擦力
+                        
+                        if (Math.abs(data.vy) < physicsConfig.minSpeed) {
+                            data.vy = 0;
+                        }
+                    }
+                    
+                    // 左右墙壁碰撞
+                    if (data.x < radius) {
+                        data.x = radius;
+                        data.vx = Math.abs(data.vx) * physicsConfig.bounce;
+                    } else if (data.x > screenWidth - radius) {
+                        data.x = screenWidth - radius;
+                        data.vx = -Math.abs(data.vx) * physicsConfig.bounce;
+                    }
+                    
+                    // 限制最大速度
+                    if (data.vx > physicsConfig.maxSpeed * 3) data.vx = physicsConfig.maxSpeed * 3;
+                    if (data.vx < -physicsConfig.maxSpeed * 3) data.vx = -physicsConfig.maxSpeed * 3;
+                    if (data.vy > physicsConfig.maxSpeed * 4) data.vy = physicsConfig.maxSpeed * 4;
+                    if (data.vy < -physicsConfig.maxSpeed * 4) data.vy = -physicsConfig.maxSpeed * 4;
+                    
+                    // 更新DOM
+                    // 注意：这里为了更好的物理中心计算，我们把 left 和 top 作为中心点处理
+                    // 但是图片默认是以左上角定位，所以通过 margin 抵消一半宽度
+                    el.style.left = `${data.x}px`;
+                    el.style.top = `${data.y}px`;
+                    el.style.marginLeft = `-${radius}px`;
+                    el.style.marginTop = `-${radius}px`;
+                    el.style.transform = `rotate(${data.rotation}deg)`;
+                }
+
+                physicsAnimationId = requestAnimationFrame(updatePhysics);
+            }
+            
+            physicsAnimationId = requestAnimationFrame(updatePhysics);
+        }
+
         function togglePhysics(enabled) {
             physicsEnabled = enabled;
             const physicsToggle = document.getElementById('physicsToggle');
@@ -941,12 +1100,14 @@
                 document.querySelectorAll('.falling-image').forEach(imgElement => {
                     const currentTop = parseInt(imgElement.style.top) || -100;
                     if (currentTop < physicsConfig.groundLevel) {
+                        const radius = parseInt(imgElement.style.width) / 2 || 25;
                         const physicsData = {
-                            x: parseInt(imgElement.style.left) || 0,
-                            y: currentTop,
-                            vx: (Math.random() - 0.5) * 0.5,
+                            x: (parseInt(imgElement.style.left) || 0) + radius,
+                            y: currentTop + radius,
+                            vx: (Math.random() - 0.5) * 2.0,
                             vy: 0,
-                            rotation: Math.random() * 360
+                            rotation: Math.random() * 360,
+                            radius: radius
                         };
                         
                         imgElement.classList.add('physics-enabled');
@@ -956,6 +1117,14 @@
                         });
                     }
                 });
+                
+                // 防止内存溢出：限制同屏物理元素的数量
+                while (physicsImages.length > 100) {
+                    const removed = physicsImages.shift();
+                    if (removed && removed.element && removed.element.parentNode) {
+                        removed.element.parentNode.removeChild(removed.element);
+                    }
+                }
                 
                 startPhysicsAnimation();
             } else {
@@ -967,9 +1136,15 @@
                     if (imgData.element && imgData.physicsData) {
                         imgData.element.classList.remove('physics-enabled');
                         
-                        const currentX = imgData.physicsData.x;
-                        const currentY = imgData.physicsData.y;
+                        imgData.element.style.marginLeft = '0px';
+                        imgData.element.style.marginTop = '0px';
+                        
+                        // 将中心点坐标还原为左上角坐标，保证切换时位置平滑
+                        const currentX = imgData.physicsData.x - imgData.physicsData.radius;
+                        const currentY = imgData.physicsData.y - imgData.physicsData.radius;
                         const currentRotation = imgData.physicsData.rotation;
+                        
+                        imgData.element.style.left = `${currentX}px`;
                         
                         restartFallingAnimation(
                             imgData.element, 
@@ -1063,18 +1238,28 @@
                     if (physicsEnabled) {
                         imgElement.classList.add('physics-enabled');
                         
+                        const radius = imgWidth / 2;
                         const physicsData = {
-                            x: parseInt(imgElement.style.left) || startX,
-                            y: Math.min(currentY, physicsConfig.groundLevel),
-                            vx: (Math.random() - 0.5) * 0.8,
+                            x: (parseInt(imgElement.style.left) || startX) + radius,
+                            y: Math.min(currentY, physicsConfig.groundLevel) + radius,
+                            vx: (Math.random() - 0.5) * 2.0,
                             vy: -Math.abs(fallSpeed) * 0.3 * physicsConfig.bounce,
-                            rotation: currentRotation
+                            rotation: currentRotation,
+                            radius: radius
                         };
                         
                         physicsImages.push({
                             element: imgElement,
                             physicsData: physicsData
                         });
+                        
+                        // 防止内存溢出：限制同屏物理元素的数量
+                        if (physicsImages.length > 100) {
+                            const removed = physicsImages.shift();
+                            if (removed && removed.element && removed.element.parentNode) {
+                                removed.element.parentNode.removeChild(removed.element);
+                            }
+                        }
                         
                         if (!physicsAnimationId) {
                             startPhysicsAnimation();
@@ -1185,9 +1370,9 @@
                     button.addEventListener('mouseleave', function(e) {
                         e.target.style.animation = 'buttonHoverOut 0.5s cubic-bezier(0.34, 1.85, 0.64, 1.5) forwards';
                         
-                        e.target.addEventListener('animationend', function handler() {
-                            if (e.target.style.animationName === 'buttonHoverOut') {
-                                e.target.style.animation = '';
+                        e.target.addEventListener('animationend', function handler(evt) {
+                            if (evt.animationName === 'buttonHoverOut') {
+                                e.target.style.animation = 'none';
                             }
                             e.target.removeEventListener('animationend', handler);
                         });
