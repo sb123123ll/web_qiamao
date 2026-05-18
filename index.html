@@ -746,6 +746,14 @@
                 width: 100%;
             }
         }
+        
+        /* 闲时漂浮动画性能优化 */
+        .container, .settings-button, .email-info, .right-bottom-container,
+        .qq-group-golden-wrapper, .pcl2-download-link, .friend-server-link,
+        .mystery-game-link, .special-thanks-button, .bilibili-button,
+        .welcome-dynamic-island {
+            will-change: transform, translate, rotate;
+        }
     </style>
 </head>
 <body>
@@ -870,12 +878,12 @@
 
         const physicsConfig = {
             gravityX: 0,
-            gravityY: 0.15,
-            friction: 0.98,
-            bounce: 0.4, // 稍微降低一点弹力，避免方形一直抖动
+            gravityY: 0.35, // 增加重力，让下落更干脆
+            friction: 0.995, // 减小空气阻力(越接近1越小)，让空中掉落更真实
+            bounce: 0.55, // 调整弹力系数
             groundLevel: window.innerHeight,
-            maxSpeed: 8,
-            minSpeed: 0.05
+            maxSpeed: 15, // 提高最大速度限制，避免高速掉落时被限速导致“减缓”
+            minSpeed: 0.1
         };
 
         // 向量数学辅助函数
@@ -1198,10 +1206,10 @@
                 }
 
             // 第二阶段：图标之间的矩形互相碰撞检测与处理 (SAT)
-            for (let i = 0; i < physicsImages.length; i++) {
-                for (let j = i + 1; j < physicsImages.length; j++) {
-                    const imgA = physicsImages[i].physicsData;
-                    const imgB = physicsImages[j].physicsData;
+                for (let i = 0; i < physicsImages.length; i++) {
+                    for (let j = i + 1; j < physicsImages.length; j++) {
+                        const imgA = physicsImages[i].physicsData;
+                        const imgB = physicsImages[j].physicsData;
                         
                         const collision = checkCollisionSAT(imgA, imgB);
                         
@@ -1209,14 +1217,23 @@
                             const overlap = collision.overlap;
                             const normal = collision.normal;
                             
-                            // 分离重叠部分 (按 50% 比例推开)
-                            const separationX = normal.x * overlap * 0.5;
-                            const separationY = normal.y * overlap * 0.5;
+                            // 动态分离比例，基于物体的速度来决定谁该被推开更多
+                            // 速度快的物体推开速度慢的物体
+                            const vA = Math.sqrt(imgA.vx * imgA.vx + imgA.vy * imgA.vy);
+                            const vB = Math.sqrt(imgB.vx * imgB.vx + imgB.vy * imgB.vy);
+                            const totalV = vA + vB || 1;
                             
-                            imgA.x -= separationX;
-                            imgA.y -= separationY;
-                            imgB.x += separationX;
-                            imgB.y += separationY;
+                            let ratioA = 0.5;
+                            let ratioB = 0.5;
+                            
+                            // 分离重叠部分
+                            const separationX = normal.x * overlap;
+                            const separationY = normal.y * overlap;
+                            
+                            imgA.x -= separationX * ratioA;
+                            imgA.y -= separationY * ratioA;
+                            imgB.x += separationX * ratioB;
+                            imgB.y += separationY * ratioB;
                             
                             // 计算相对速度
                             const kx = imgA.vx - imgB.vx;
@@ -1226,7 +1243,7 @@
                             const dotProduct = kx * normal.x + ky * normal.y;
                             if (dotProduct > 0) {
                                 // 弹性碰撞恢复系数
-                                const restitution = 0.5;
+                                const restitution = 0.55;
                                 // 碰撞冲量（假设质量相等）
                                 const p = (1 + restitution) * dotProduct / 2.0;
                                 
@@ -1235,11 +1252,10 @@
                                 imgB.vx += p * normal.x;
                                 imgB.vy += p * normal.y;
                                 
-                                // 根据碰撞点给图片增加旋转动量
-                                // 这是一个简化的力矩模拟，使得边角碰撞会导致图片旋转
+                                // 旋转动量稍微减弱一点，防止无休止旋转
                                 const crossProduct = kx * normal.y - ky * normal.x;
-                                imgA.rotation += crossProduct * 2.0;
-                                imgB.rotation -= crossProduct * 2.0;
+                                imgA.rotation += crossProduct * 1.5;
+                                imgB.rotation -= crossProduct * 1.5;
                             }
                         }
                     }
@@ -1275,8 +1291,9 @@
                     if (data.y > screenHeight - maxOffsetY) {
                         data.y = screenHeight - maxOffsetY;
                         data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
-                        data.vx *= 0.8; // 触地摩擦力
+                        data.vx *= 0.6; // 增加触地摩擦力，防止在底部过度滑动
                         
+                        // 底部减速优化：不再强制置0，而是让物理引擎自然耗散
                         if (Math.abs(data.vy) < physicsConfig.minSpeed) {
                             data.vy = 0;
                         }
@@ -1598,8 +1615,70 @@
                 physicsConfig.gravityY = gravityY;
             });
         }
+        
+        // 闲时待机漂浮动画 (如海面漂浮)
+        function startIdleFloatingUI() {
+            // 选择需要漂浮的 UI 元素和按钮
+            const elements = document.querySelectorAll(`
+                .container, 
+                .settings-button, 
+                .email-info, 
+                .right-bottom-container,
+                .qq-group-golden-wrapper,
+                .pcl2-download-link,
+                .friend-server-link,
+                .mystery-game-link,
+                .special-thanks-button,
+                .bilibili-button,
+                .welcome-dynamic-island
+            `);
+            
+            const startTime = performance.now();
+            
+            function animateFloat(time) {
+                const elapsed = (time - startTime) / 1000; // 转换为秒
+                
+                elements.forEach((el, index) => {
+                    // 为不同元素生成略微不同的频率和相位，使得运动显得有机而不死板
+                    const speed = 1.2 + (index % 4) * 0.15;
+                    const phase = index * 0.8;
+                    
+                    // 区分主容器和内部按钮，容器漂浮幅度小一点，按钮活泼一点
+                    const isContainer = el.classList.contains('container') || 
+                                        el.classList.contains('right-bottom-container') ||
+                                        el.classList.contains('email-info');
+                    
+                    // Y轴上下浮动
+                    const amplitudeY = isContainer ? 3 : 5;
+                    const y = Math.sin(elapsed * speed + phase) * amplitudeY;
+                    
+                    // X轴极轻微的水平晃动
+                    const x = Math.cos(elapsed * speed * 0.8 + phase) * (isContainer ? 0.5 : 1.5);
+                    
+                    // 按钮带上非常轻微的旋转
+                    let rot = 0;
+                    if (!isContainer) {
+                        rot = Math.sin(elapsed * speed * 1.1 + phase) * 0.8;
+                    }
+                    
+                    // 使用 CSS 原生的 translate 和 rotate 属性
+                    // 这样可以与已有的 transform (如缩放、位移等 CSS 动画) 完美叠加，不发生冲突！
+                    el.style.translate = `${x}px ${y}px`;
+                    if (rot !== 0) {
+                        el.style.rotate = `${rot}deg`;
+                    }
+                });
+                
+                requestAnimationFrame(animateFloat);
+            }
+            
+            requestAnimationFrame(animateFloat);
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
+            // 启动闲时漂浮动画
+            startIdleFloatingUI();
+            
             setTimeout(() => {
                 preloadImages();
                 initDeviceOrientation();
