@@ -746,6 +746,14 @@
                 width: 100%;
             }
         }
+        
+        /* 闲时漂浮动画性能优化 */
+        .container, .settings-button, .email-info, .right-bottom-container,
+        .qq-group-golden-wrapper, .pcl2-download-link, .friend-server-link,
+        .mystery-game-link, .special-thanks-button, .bilibili-button,
+        .welcome-dynamic-island {
+            will-change: transform, translate, rotate;
+        }
     </style>
 </head>
 <body>
@@ -870,32 +878,242 @@
 
         const physicsConfig = {
             gravityX: 0,
-            gravityY: 0.15,
-            friction: 0.96,
-            bounce: 0.4,
+            gravityY: 0.45, // 稍微加大重力
+            friction: 0.99, // 空气阻力
+            angularFriction: 0.98, // 空气角阻力(旋转衰减)
+            bounce: 0.3, // 降低弹力系数，减少堆叠时的剧烈抖动
             groundLevel: window.innerHeight,
-            collisionDistance: 55,
-            maxSpeed: 5,
-            minSpeed: 0.05,
-            collisionForce: 0.15
+            maxSpeed: 20,
+            minSpeed: 0.5
         };
+
+        // 向量数学辅助函数
+        const Vector = {
+            dot: (v1, v2) => v1.x * v2.x + v1.y * v2.y,
+            sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+            add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+            mult: (v, n) => ({ x: v.x * n, y: v.y * n }),
+            normalize: (v) => {
+                const len = Math.sqrt(v.x * v.x + v.y * v.y);
+                if (len === 0) return { x: 0, y: 0 };
+                return { x: v.x / len, y: v.y / len };
+            },
+            perp: (v) => ({ x: -v.y, y: v.x }) // 垂直向量
+        };
+
+        // 获取默认矩形顶点
+        function getDefaultHull() {
+            return [
+                { x: -0.5, y: -0.5 },
+                { x: 0.5, y: -0.5 },
+                { x: 0.5, y: 0.5 },
+                { x: -0.5, y: 0.5 }
+            ];
+        }
+
+        // 提取图片非透明区域的凸包（适配图片真实形状）
+        function extractHull(image) {
+            try {
+                const canvas = document.createElement('canvas');
+                const size = 64; // 压缩分辨率以提高计算速度
+                canvas.width = size;
+                canvas.height = size;
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.drawImage(image, 0, 0, size, size);
+                
+                const imageData = ctx.getImageData(0, 0, size, size).data;
+                const points = [];
+                
+                // 简单的白色背景检测 (应对没有透明通道的JPG)
+                const bgR = imageData[0], bgG = imageData[1], bgB = imageData[2], bgA = imageData[3];
+                const isBgWhite = bgA === 255 && bgR > 240 && bgG > 240 && bgB > 240;
+                
+                for (let y = 0; y < size; y++) {
+                    for (let x = 0; x < size; x++) {
+                        const idx = (y * size + x) * 4;
+                        const r = imageData[idx], g = imageData[idx + 1], b = imageData[idx + 2], a = imageData[idx + 3];
+                        
+                        let isSolid = a > 128; // 非透明像素
+                        
+                        // 如果是纯白背景的图，将白色也视为透明
+                        if (isSolid && isBgWhite && r > 240 && g > 240 && b > 240) {
+                            isSolid = false;
+                        }
+                        
+                        if (isSolid) {
+                            points.push({ x: x / size - 0.5, y: y / size - 0.5 });
+                        }
+                    }
+                }
+                
+                if (points.length === 0) return getDefaultHull();
+                
+                // Monotone Chain (单调链) 算法求凸包
+                points.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+                const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+                
+                const lower = [];
+                for (let i = 0; i < points.length; i++) {
+                    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], points[i]) <= 0) lower.pop();
+                    lower.push(points[i]);
+                }
+                
+                const upper = [];
+                for (let i = points.length - 1; i >= 0; i--) {
+                    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], points[i]) <= 0) upper.pop();
+                    upper.push(points[i]);
+                }
+                
+                upper.pop();
+                lower.pop();
+                const hull = lower.concat(upper);
+                
+                // 简化凸包（移除近似共线的点，减少碰撞计算量）
+                const simplified = [];
+                for (let i = 0; i < hull.length; i++) {
+                    const prev = hull[(i - 1 + hull.length) % hull.length];
+                    const curr = hull[i];
+                    const next = hull[(i + 1) % hull.length];
+                    if (Math.abs(cross(prev, curr, next)) > 0.005) {
+                        simplified.push(curr);
+                    }
+                }
+                
+                return simplified.length >= 3 ? simplified : getDefaultHull();
+            } catch (e) {
+                // 本地 file:// 协议可能会触发跨域错误
+                console.warn("跨域限制：无法读取图片生成精确碰撞体积，已降级为正方形。若要启用精确体积，请在本地服务器(http://)下运行。");
+                return getDefaultHull();
+            }
+        }
+
+        // 获取多边形的真实顶点
+        function getPolygonVertices(imgData) {
+            const rad = imgData.rotation * Math.PI / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            
+            const hull = imgData.hull || getDefaultHull();
+            
+            return hull.map(p => {
+                const px = p.x * imgData.width;
+                const py = p.y * imgData.height;
+                return {
+                    x: imgData.x + px * cos - py * sin,
+                    y: imgData.y + px * sin + py * cos
+                };
+            });
+        }
+
+        // 获取多边形的法向量（分离轴）
+        function getAxes(vertices) {
+            const axes = [];
+            for (let i = 0; i < vertices.length; i++) {
+                const p1 = vertices[i];
+                const p2 = vertices[(i + 1) % vertices.length];
+                const edge = Vector.sub(p2, p1);
+                const normal = Vector.normalize(Vector.perp(edge));
+                axes.push(normal);
+            }
+            return axes;
+        }
+
+        // 在轴上投影多边形
+        function projectPolygon(axis, vertices) {
+            let min = Vector.dot(axis, vertices[0]);
+            let max = min;
+            for (let i = 1; i < vertices.length; i++) {
+                const p = Vector.dot(axis, vertices[i]);
+                if (p < min) min = p;
+                else if (p > max) max = p;
+            }
+            return { min, max };
+        }
+
+        // 分离轴定理 (SAT) 碰撞检测
+        function checkCollisionSAT(imgA, imgB) {
+            const verticesA = getPolygonVertices(imgA);
+            const verticesB = getPolygonVertices(imgB);
+            
+            const axesA = getAxes(verticesA);
+            const axesB = getAxes(verticesB);
+            const axes = [...axesA, ...axesB];
+            
+            let minOverlap = Infinity;
+            let smallestAxis = null;
+            
+            for (let i = 0; i < axes.length; i++) {
+                const axis = axes[i];
+                
+                const projA = projectPolygon(axis, verticesA);
+                const projB = projectPolygon(axis, verticesB);
+                
+                // 检查是否分离
+                if (projA.max < projB.min || projB.max < projA.min) {
+                    return null; // 存在分离轴，没有碰撞
+                }
+                
+                // 计算重叠量
+                const overlap = Math.min(projA.max, projB.max) - Math.max(projA.min, projB.min);
+                
+                if (overlap < minOverlap) {
+                    minOverlap = overlap;
+                    smallestAxis = axis;
+                }
+            }
+            
+            // 确保法向量从 A 指向 B
+            const centerVector = Vector.sub({x: imgB.x, y: imgB.y}, {x: imgA.x, y: imgA.y});
+            if (Vector.dot(smallestAxis, centerVector) < 0) {
+                smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
+            }
+            
+            return {
+                overlap: minOverlap,
+                normal: smallestAxis
+            };
+        }
 
         function preloadImages() {
             for (let i = 1; i <= totalImages; i++) {
                 const img = new Image();
-                img.src = `${imageBasePath}${i}.jpg`;
+                img.crossOrigin = "Anonymous"; // 允许 Canvas 读取图片像素
+                
+                let fallbackCount = 0;
+                
                 img.onload = () => {
+                    img.hull = extractHull(img);
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         startRaining();
                     }
                 };
+                
                 img.onerror = () => {
+                    // 如果尝试了 jpg 失败，尝试 png
+                    if (fallbackCount === 0) {
+                        fallbackCount++;
+                        img.src = `${imageBasePath}${i}.png`;
+                        return;
+                    }
+                    
+                    // 如果跨域报错，尝试不带 crossOrigin 加载
+                    if (fallbackCount === 1 && img.crossOrigin === "Anonymous") {
+                        fallbackCount++;
+                        img.crossOrigin = ""; // 移除跨域属性以保证基本加载
+                        img.src = `${imageBasePath}${i}.jpg`; // 重新尝试原始路径
+                        return;
+                    }
+                    
+                    // 如果都没成功，依然计入已加载数量，防止网站卡死
+                    img.hull = getDefaultHull();
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         startRaining();
                     }
                 };
+                
+                img.src = `${imageBasePath}${i}.jpg`;
                 imagePool.push(img);
             }
         }
@@ -975,65 +1193,81 @@
                     const imgObj = physicsImages[i];
                     const data = imgObj.physicsData;
                     
-                    data.vy += physicsConfig.gravity * deltaTime; // 重力
+                    data.vx += physicsConfig.gravityX * deltaTime; // X轴重力(受设备倾斜影响)
+                    data.vy += physicsConfig.gravityY * deltaTime; // Y轴重力
                     
                     data.vx *= Math.pow(physicsConfig.friction, deltaTime); // 空气阻力
                     data.vy *= Math.pow(physicsConfig.friction, deltaTime);
+                    data.vRot *= Math.pow(physicsConfig.angularFriction, deltaTime); // 旋转阻力
+                    
+                    // 休眠机制：当速度极小且接近静止时，彻底清零以避免微小的抽搐移动
+                    if (Math.abs(data.vx) < 0.05) data.vx = 0;
+                    if (Math.abs(data.vRot) < 0.05) data.vRot = 0;
 
                     data.x += data.vx * deltaTime;
                     data.y += data.vy * deltaTime;
-                    
-                    // 根据水平速度旋转，增加物理真实感
-                    data.rotation += data.vx * 2 * deltaTime;
+                    data.rotation += data.vRot * deltaTime;
                 }
 
-                // 第二阶段：图标之间的互相碰撞检测与处理
+            // 第二阶段：图标之间的矩形互相碰撞检测与处理 (SAT)
                 for (let i = 0; i < physicsImages.length; i++) {
                     for (let j = i + 1; j < physicsImages.length; j++) {
-                        const imgA = physicsImages[i];
-                        const imgB = physicsImages[j];
+                        const imgA = physicsImages[i].physicsData;
+                        const imgB = physicsImages[j].physicsData;
                         
-                        // 计算两圆心之间的距离
-                        const dx = imgB.physicsData.x - imgA.physicsData.x;
-                        const dy = imgB.physicsData.y - imgA.physicsData.y;
-                        const distanceSq = dx * dx + dy * dy;
+                        const collision = checkCollisionSAT(imgA, imgB);
                         
-                        // 碰撞距离阈值：两个半径之和
-                        const minDistance = imgA.physicsData.radius + imgB.physicsData.radius;
-                        
-                        if (distanceSq < minDistance * minDistance && distanceSq > 0) {
-                            const distance = Math.sqrt(distanceSq);
-                            const overlap = minDistance - distance;
+                        if (collision) {
+                            const overlap = collision.overlap;
+                            const normal = collision.normal;
                             
-                            // 法向量
-                            const nx = dx / distance;
-                            const ny = dy / distance;
+                            // 动态分离比例，基于物体的速度来决定谁该被推开更多
+                            // 速度快的物体推开速度慢的物体
+                            const vA = Math.sqrt(imgA.vx * imgA.vx + imgA.vy * imgA.vy);
+                            const vB = Math.sqrt(imgB.vx * imgB.vx + imgB.vy * imgB.vy);
+                            const totalV = vA + vB || 1;
+                            
+                            let ratioA = 0.5;
+                            let ratioB = 0.5;
                             
                             // 分离重叠部分
-                            const separationX = nx * overlap * 0.5;
-                            const separationY = ny * overlap * 0.5;
+                            const separationX = normal.x * overlap;
+                            const separationY = normal.y * overlap;
                             
-                            imgA.physicsData.x -= separationX;
-                            imgA.physicsData.y -= separationY;
-                            imgB.physicsData.x += separationX;
-                            imgB.physicsData.y += separationY;
+                            imgA.x -= separationX * ratioA;
+                            imgA.y -= separationY * ratioA;
+                            imgB.x += separationX * ratioB;
+                            imgB.y += separationY * ratioB;
                             
                             // 计算相对速度
-                            const kx = imgA.physicsData.vx - imgB.physicsData.vx;
-                            const ky = imgA.physicsData.vy - imgB.physicsData.vy;
+                            const kx = imgA.vx - imgB.vx;
+                            const ky = imgA.vy - imgB.vy;
                             
                             // 如果物体正在分离，则不处理速度交换
-                            const dotProduct = kx * nx + ky * ny;
+                            const dotProduct = kx * normal.x + ky * normal.y;
                             if (dotProduct > 0) {
                                 // 弹性碰撞恢复系数
-                                const restitution = 0.6;
+                                const restitution = 0.2; // 降低弹力，减少拥挤时乱飞
                                 // 碰撞冲量（假设质量相等）
                                 const p = (1 + restitution) * dotProduct / 2.0;
                                 
-                                imgA.physicsData.vx -= p * nx;
-                                imgA.physicsData.vy -= p * ny;
-                                imgB.physicsData.vx += p * nx;
-                                imgB.physicsData.vy += p * ny;
+                                imgA.vx -= p * normal.x;
+                                imgA.vy -= p * normal.y;
+                                imgB.vx += p * normal.x;
+                                imgB.vy += p * normal.y;
+                                
+                                // 将碰撞挤压转换为旋转速度
+                                const crossProduct = kx * normal.y - ky * normal.x;
+                                imgA.vRot += crossProduct * 1.2;
+                                imgB.vRot -= crossProduct * 1.2;
+                                
+                                // 碰撞摩擦力：当两个物体挤在一起时，消耗彼此的动能，让其快速安静
+                                imgA.vx *= 0.85;
+                                imgA.vy *= 0.85;
+                                imgB.vx *= 0.85;
+                                imgB.vy *= 0.85;
+                                imgA.vRot *= 0.85;
+                                imgB.vRot *= 0.85;
                             }
                         }
                     }
@@ -1041,6 +1275,7 @@
 
                 // 第三阶段：墙壁和地板碰撞检测，以及更新DOM
                 const screenWidth = window.innerWidth;
+                const screenHeight = window.innerHeight;
                 
                 for (let i = physicsImages.length - 1; i >= 0; i--) {
                     const imgObj = physicsImages[i];
@@ -1048,39 +1283,68 @@
                     const el = imgObj.element;
                     const radius = data.radius;
                     
-                    // 地板碰撞
-                    if (data.y > physicsConfig.groundLevel - radius) {
-                        data.y = physicsConfig.groundLevel - radius;
-                        data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
-                        data.vx *= 0.8; // 触地摩擦力
-                        
-                        if (Math.abs(data.vy) < physicsConfig.minSpeed) {
-                            data.vy = 0;
+                    // 地板碰撞 (改为了窗口最底部)
+                    let minOffsetX = -radius, maxOffsetX = radius, maxOffsetY = radius, minOffsetY = -radius;
+                    if (data.hull) {
+                        minOffsetX = maxOffsetX = maxOffsetY = minOffsetY = 0;
+                        const rad = data.rotation * Math.PI / 180;
+                        const cos = Math.cos(rad);
+                        const sin = Math.sin(rad);
+                        for(let p of data.hull) {
+                            const px_rot = p.x * data.width * cos - p.y * data.height * sin;
+                            const py_rot = p.x * data.width * sin + p.y * data.height * cos;
+                            if (px_rot < minOffsetX) minOffsetX = px_rot;
+                            if (px_rot > maxOffsetX) maxOffsetX = px_rot;
+                            if (py_rot < minOffsetY) minOffsetY = py_rot;
+                            if (py_rot > maxOffsetY) maxOffsetY = py_rot;
                         }
                     }
                     
+                    if (data.y > screenHeight - maxOffsetY) {
+                        data.y = screenHeight - maxOffsetY;
+                        
+                        // 只有下落速度足够快时才会反弹，否则直接贴地（防止反复微弱弹跳造成的顿挫）
+                        if (data.vy > 2.0) {
+                            data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
+                        } else {
+                            data.vy = 0;
+                        }
+                        
+                        data.vx *= 0.5; // 强力的触地摩擦力，防止在底部溜冰
+                        data.vRot *= 0.5; // 强力的触地角摩擦力，防止倒地后一直打转
+                    }
+                    
+                    // 天花板碰撞 (防止被设备重力甩出屏幕上方)
+                    if (data.y < -minOffsetY) {
+                        data.y = -minOffsetY;
+                        data.vy = Math.abs(data.vy) * physicsConfig.bounce;
+                    }
+                    
                     // 左右墙壁碰撞
-                    if (data.x < radius) {
-                        data.x = radius;
+                    if (data.x < -minOffsetX) {
+                        data.x = -minOffsetX;
                         data.vx = Math.abs(data.vx) * physicsConfig.bounce;
-                    } else if (data.x > screenWidth - radius) {
-                        data.x = screenWidth - radius;
+                    } else if (data.x > screenWidth - maxOffsetX) {
+                        data.x = screenWidth - maxOffsetX;
                         data.vx = -Math.abs(data.vx) * physicsConfig.bounce;
                     }
                     
-                    // 限制最大速度
+                    // 限制最大线速度
                     if (data.vx > physicsConfig.maxSpeed * 3) data.vx = physicsConfig.maxSpeed * 3;
                     if (data.vx < -physicsConfig.maxSpeed * 3) data.vx = -physicsConfig.maxSpeed * 3;
                     if (data.vy > physicsConfig.maxSpeed * 4) data.vy = physicsConfig.maxSpeed * 4;
                     if (data.vy < -physicsConfig.maxSpeed * 4) data.vy = -physicsConfig.maxSpeed * 4;
                     
+                    // 限制最大旋转速度，防止鬼畜旋转
+                    if (data.vRot > 30) data.vRot = 30;
+                    if (data.vRot < -30) data.vRot = -30;
+                    
                     // 更新DOM
-                    // 注意：这里为了更好的物理中心计算，我们把 left 和 top 作为中心点处理
-                    // 但是图片默认是以左上角定位，所以通过 margin 抵消一半宽度
                     el.style.left = `${data.x}px`;
                     el.style.top = `${data.y}px`;
-                    el.style.marginLeft = `-${radius}px`;
-                    el.style.marginTop = `-${radius}px`;
+                    // OBB矩形渲染：依然需要抵消宽高的一半来居中
+                    el.style.marginLeft = `-${data.width/2}px`;
+                    el.style.marginTop = `-${data.height/2}px`;
                     el.style.transform = `rotate(${data.rotation}deg)`;
                 }
 
@@ -1100,15 +1364,27 @@
             if (enabled) {
                 document.querySelectorAll('.falling-image').forEach(imgElement => {
                     const currentTop = parseInt(imgElement.style.top) || -100;
-                    if (currentTop < physicsConfig.groundLevel) {
-                        const radius = parseInt(imgElement.style.width) / 2 || 25;
+                    if (currentTop < window.innerHeight) {
+                        const width = parseInt(imgElement.style.width) || 50;
+                        const height = width; // 正方形图片
+                        const radius = width / 2;
+                        
+                        // 尝试从 imagePool 中找到对应的图片提取 hull
+                        const srcPath = imgElement.src;
+                        const sourceImg = imagePool.find(i => i.src === srcPath);
+                        const hull = sourceImg ? sourceImg.hull : getDefaultHull();
+                        
                         const physicsData = {
                             x: (parseInt(imgElement.style.left) || 0) + radius,
                             y: currentTop + radius,
                             vx: (Math.random() - 0.5) * 2.0,
                             vy: 0,
+                            vRot: (Math.random() - 0.5) * 5.0,
                             rotation: Math.random() * 360,
-                            radius: radius
+                            width: width,
+                            height: height,
+                            radius: radius,
+                            hull: hull
                         };
                         
                         imgElement.classList.add('physics-enabled');
@@ -1119,13 +1395,7 @@
                     }
                 });
                 
-                // 防止内存溢出：限制同屏物理元素的数量
-                while (physicsImages.length > 100) {
-                    const removed = physicsImages.shift();
-                    if (removed && removed.element && removed.element.parentNode) {
-                        removed.element.parentNode.removeChild(removed.element);
-                    }
-                }
+                // 移除数量限制的清理代码
                 
                 startPhysicsAnimation();
             } else {
@@ -1216,6 +1486,41 @@
 
             document.body.appendChild(imgElement);
 
+            if (physicsEnabled) {
+                // 如果启用了物理效果，生成图片时直接将其加入物理系统，不再使用独立下落动画
+                // 使其在空中就具有碰撞体积
+                const radius = imgWidth / 2;
+                imgElement.classList.add('physics-enabled');
+                
+                // 将坐标从左上角转换为中心点坐标
+                const startXCenter = startX + radius;
+                const startYCenter = currentY + radius;
+                
+                const physicsData = {
+                    x: startXCenter,
+                    y: startYCenter,
+                    vx: (Math.random() - 0.5) * 1.0,
+                    vy: fallSpeed * 0.5,
+                    vRot: spinSpeed * 1.5,
+                    rotation: currentRotation,
+                    width: imgWidth,
+                    height: imgWidth,
+                    radius: radius,
+                    hull: imgSource.hull || getDefaultHull()
+                };
+                
+                physicsImages.push({
+                    element: imgElement,
+                    physicsData: physicsData
+                });
+                
+                if (!physicsAnimationId) {
+                    startPhysicsAnimation();
+                }
+                
+                return; // 直接返回，不再执行下面的非物理动画
+            }
+
             const imageData = {
                 element: imgElement,
                 width: imgWidth,
@@ -1226,35 +1531,7 @@
             };
 
             function animate() {
-                if (physicsEnabled) {
-                    // 如果启用了物理效果，生成图片时直接将其加入物理系统，不再使用独立下落动画
-                    const radius = imgWidth / 2;
-                    imgElement.classList.add('physics-enabled');
-                    
-                    // 将坐标从左上角转换为中心点坐标
-                    const startXCenter = startX + radius;
-                    const startYCenter = currentY + radius;
-                    
-                    const physicsData = {
-                        x: startXCenter,
-                        y: startYCenter,
-                        vx: (Math.random() - 0.5) * 1.0,
-                        vy: fallSpeed * 0.5,
-                        rotation: currentRotation,
-                        radius: radius
-                    };
-                    
-                    physicsImages.push({
-                        element: imgElement,
-                        physicsData: physicsData
-                    });
-                    
-                    if (!physicsAnimationId) {
-                        startPhysicsAnimation();
-                    }
-                    
-                    return;
-                }
+                if (physicsEnabled) return; // 防止中途切换时出现双重动画
 
                 currentY += fallSpeed;
                 currentRotation += spinSpeed;
@@ -1290,10 +1567,142 @@
                 }, 6000);
             }, 500);
         }
+        
+        function initDeviceOrientation() {
+            if (window.DeviceOrientationEvent) {
+                // 请求权限（针对iOS 13+）
+                if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+                    // 通常需要在用户点击事件中调用，这里先尝试绑定
+                    document.body.addEventListener('click', function requestOrientation() {
+                        DeviceOrientationEvent.requestPermission()
+                            .then(permissionState => {
+                                if (permissionState === 'granted') {
+                                    bindOrientationEvent();
+                                }
+                            })
+                            .catch(console.error);
+                        document.body.removeEventListener('click', requestOrientation);
+                    }, { once: true });
+                } else {
+                    bindOrientationEvent();
+                }
+            }
+        }
+        
+        function bindOrientationEvent() {
+            window.addEventListener('deviceorientation', function(event) {
+                if (!physicsEnabled) return;
+                
+                // 获取设备的倾斜角度 (beta: 前后倾斜, gamma: 左右倾斜)
+                let beta = event.beta;   // -180 到 180
+                let gamma = event.gamma; // -90 到 90
+                
+                // 如果获取不到数据（例如桌面设备），则使用默认重力
+                if (beta === null || gamma === null) return;
+                
+                // 限制角度，避免过度反转
+                if (beta > 90) beta = 90;
+                if (beta < -90) beta = -90;
+                
+                // 根据设备倾斜计算重力方向和大小
+                const maxGravity = 0.5; // 最大重力加速度
+                
+                // 屏幕旋转适配
+                const orientation = window.orientation || 0;
+                
+                let gravityX = 0;
+                let gravityY = 0;
+                
+                if (orientation === 0) { // 竖屏
+                    gravityX = (gamma / 90) * maxGravity;
+                    gravityY = (beta / 90) * maxGravity;
+                } else if (orientation === 90) { // 横屏(向左转)
+                    gravityX = (beta / 90) * maxGravity;
+                    gravityY = -(gamma / 90) * maxGravity;
+                } else if (orientation === -90) { // 横屏(向右转)
+                    gravityX = -(beta / 90) * maxGravity;
+                    gravityY = (gamma / 90) * maxGravity;
+                } else if (orientation === 180) { // 倒竖屏
+                    gravityX = -(gamma / 90) * maxGravity;
+                    gravityY = -(beta / 90) * maxGravity;
+                }
+                
+                // 如果重力太小（设备接近平放），给一个默认向下的微小重力
+                if (Math.abs(gravityX) < 0.05 && Math.abs(gravityY) < 0.05) {
+                    gravityY = 0.15;
+                }
+                
+                physicsConfig.gravityX = gravityX;
+                physicsConfig.gravityY = gravityY;
+            });
+        }
+        
+        // 闲时待机漂浮动画 (如海面漂浮)
+        function startIdleFloatingUI() {
+            // 选择需要漂浮的 UI 元素和按钮
+            const elements = document.querySelectorAll(`
+                .container, 
+                .settings-button, 
+                .email-info, 
+                .right-bottom-container,
+                .qq-group-golden-wrapper,
+                .pcl2-download-link,
+                .friend-server-link,
+                .mystery-game-link,
+                .special-thanks-button,
+                .bilibili-button,
+                .welcome-dynamic-island
+            `);
+            
+            const startTime = performance.now();
+            
+            function animateFloat(time) {
+                const elapsed = (time - startTime) / 1000; // 转换为秒
+                
+                elements.forEach((el, index) => {
+                    // 为不同元素生成略微不同的频率和相位，使得运动显得有机而不死板
+                    const speed = 1.2 + (index % 4) * 0.15;
+                    const phase = index * 0.8;
+                    
+                    // 区分主容器和内部按钮，容器漂浮幅度小一点，按钮活泼一点
+                    const isContainer = el.classList.contains('container') || 
+                                        el.classList.contains('right-bottom-container') ||
+                                        el.classList.contains('email-info');
+                    
+                    // Y轴上下浮动
+                    const amplitudeY = isContainer ? 3 : 5;
+                    const y = Math.sin(elapsed * speed + phase) * amplitudeY;
+                    
+                    // X轴极轻微的水平晃动
+                    const x = Math.cos(elapsed * speed * 0.8 + phase) * (isContainer ? 0.5 : 1.5);
+                    
+                    // 按钮带上非常轻微的旋转
+                    let rot = 0;
+                    if (!isContainer) {
+                        rot = Math.sin(elapsed * speed * 1.1 + phase) * 0.8;
+                    }
+                    
+                    // 使用 CSS 原生的 translate 和 rotate 属性
+                    // 这样可以与已有的 transform (如缩放、位移等 CSS 动画) 完美叠加，不发生冲突！
+                    el.style.translate = `${x}px ${y}px`;
+                    if (rot !== 0) {
+                        el.style.rotate = `${rot}deg`;
+                    }
+                });
+                
+                requestAnimationFrame(animateFloat);
+            }
+            
+            requestAnimationFrame(animateFloat);
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
+            // 启动闲时漂浮动画
+            startIdleFloatingUI();
+            
             setTimeout(() => {
                 preloadImages();
+                initDeviceOrientation();
             }, 2000);
             
             const settingsButton = document.getElementById('settingsButton');
