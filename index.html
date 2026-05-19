@@ -1077,12 +1077,25 @@
         function preloadImages() {
             for (let i = 1; i <= totalImages; i++) {
                 const img = new Image();
+                
+                // 将图片信息封装为一个对象放入池中，即使图片没有完全加载成功，也有一个默认的占位对象参与下雨，避免整个数组索引错乱
+                const imageObj = {
+                    src: `${imageBasePath}${i}.jpg`,
+                    imgElement: img,
+                    hull: getDefaultHull(),
+                    loaded: false
+                };
+                imagePool.push(imageObj);
+                
                 img.crossOrigin = "Anonymous"; // 允许 Canvas 读取图片像素
                 
                 let fallbackCount = 0;
                 
                 img.onload = () => {
-                    img.hull = extractHull(img);
+                    imageObj.loaded = true;
+                    imageObj.src = img.src; // 更新为最终成功加载的路径
+                    imageObj.hull = extractHull(img);
+                    
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         startRaining();
@@ -1097,16 +1110,16 @@
                         return;
                     }
                     
-                    // 如果跨域报错，尝试不带 crossOrigin 加载
-                    if (fallbackCount === 1 && img.crossOrigin === "Anonymous") {
+                    // 如果跨域报错或png也失败，尝试不带 crossOrigin 加载原始jpg
+                    if (fallbackCount === 1) {
                         fallbackCount++;
                         img.crossOrigin = ""; // 移除跨域属性以保证基本加载
                         img.src = `${imageBasePath}${i}.jpg`; // 重新尝试原始路径
                         return;
                     }
                     
-                    // 如果都没成功，依然计入已加载数量，防止网站卡死
-                    img.hull = getDefaultHull();
+                    // 如果都没成功，将其标记为加载失败，但依然计入已加载数量，防止网站卡死
+                    console.warn(`图片 ${i} 彻底加载失败，将不会出现在雨中`);
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         startRaining();
@@ -1114,7 +1127,6 @@
                 };
                 
                 img.src = `${imageBasePath}${i}.jpg`;
-                imagePool.push(img);
             }
         }
 
@@ -1380,9 +1392,15 @@
                         const radius = width / 2;
                         
                         // 尝试从 imagePool 中找到对应的图片提取 hull
-                        const srcPath = imgElement.src;
-                        const sourceImg = imagePool.find(i => i.src === srcPath);
-                        const hull = sourceImg ? sourceImg.hull : getDefaultHull();
+                const srcPath = imgElement.src;
+                // 这里比较 src 的时候，需要处理完整绝对路径和相对路径的区别
+                const sourceImg = imagePool.find(i => {
+                    // 如果网页运行在 http 协议下，imgElement.src 会被自动解析为完整的 URL (如 http://localhost:3000/1.jpg)
+                    // 而 imagePool 里的 src 可能是 "./1.jpg"，因此使用 endsWith 模糊匹配来确认是哪张图片
+                    const filename = i.src.split('/').pop();
+                    return srcPath.endsWith('/' + filename) || srcPath === filename;
+                });
+                const hull = (sourceImg && sourceImg.loaded) ? sourceImg.hull : getDefaultHull();
                         
                         const physicsData = {
                             x: (parseInt(imgElement.style.left) || 0) + radius,
@@ -1472,8 +1490,12 @@
         function createFallingImage() {
             if (imagePool.length === 0 || !rainEnabled) return;
 
-            const randomIndex = Math.floor(Math.random() * imagePool.length);
-            const imgSource = imagePool[randomIndex];
+            // 过滤出真正加载成功的图片
+            const validImages = imagePool.filter(img => img.loaded);
+            if (validImages.length === 0) return; // 如果没有任何一张图片加载成功，就不下雨了
+
+            const randomIndex = Math.floor(Math.random() * validImages.length);
+            const imgSource = validImages[randomIndex];
 
             const imgElement = document.createElement('img');
             imgElement.className = 'falling-image';
