@@ -879,9 +879,9 @@
         const physicsConfig = {
             gravityX: 0,
             gravityY: 0.45, // 稍微加大重力
-            friction: 0.99, // 空气阻力
-            angularFriction: 0.98, // 空气角阻力(旋转衰减)
-            bounce: 0.3, // 降低弹力系数，减少堆叠时的剧烈抖动
+            friction: 0.995, // 空气阻力
+            angularFriction: 0.99, // 空气角阻力(旋转衰减)
+            bounce: 0.35, // 稍微恢复一点弹力，让整体更活跃
             groundLevel: window.innerHeight,
             maxSpeed: 20,
             minSpeed: 0.5
@@ -1239,6 +1239,16 @@
                             imgB.x += separationX * ratioB;
                             imgB.y += separationY * ratioB;
                             
+                            // 【核心物理优化】：基于挤压偏移量产生真实的物理翻滚力矩 (Push Torque)
+                            // 如果物体A砸在物体B的边缘（偏心挤压），除了被推开，还会产生巨大的旋转力矩使其翻滚掉落
+                            const dx = imgB.x - imgA.x;
+                            const dy = imgB.y - imgA.y;
+                            const eccentric = (dx * normal.y - dy * normal.x); // 偏心度
+                            const pushTorque = eccentric * overlap * 0.08; // 转化为角速度
+                            
+                            imgA.vRot -= pushTorque * ratioA;
+                            imgB.vRot -= pushTorque * ratioB;
+                            
                             // 计算相对速度
                             const kx = imgA.vx - imgB.vx;
                             const ky = imgA.vy - imgB.vy;
@@ -1247,7 +1257,7 @@
                             const dotProduct = kx * normal.x + ky * normal.y;
                             if (dotProduct > 0) {
                                 // 弹性碰撞恢复系数
-                                const restitution = 0.2; // 降低弹力，减少拥挤时乱飞
+                                const restitution = 0.35; 
                                 // 碰撞冲量（假设质量相等）
                                 const p = (1 + restitution) * dotProduct / 2.0;
                                 
@@ -1256,18 +1266,18 @@
                                 imgB.vx += p * normal.x;
                                 imgB.vy += p * normal.y;
                                 
-                                // 将碰撞挤压转换为旋转速度
+                                // 将碰撞速度差异转换为旋转速度
                                 const crossProduct = kx * normal.y - ky * normal.x;
-                                imgA.vRot += crossProduct * 1.2;
-                                imgB.vRot -= crossProduct * 1.2;
+                                imgA.vRot += crossProduct * 2.0;
+                                imgB.vRot -= crossProduct * 2.0;
                                 
-                                // 碰撞摩擦力：当两个物体挤在一起时，消耗彼此的动能，让其快速安静
-                                imgA.vx *= 0.85;
-                                imgA.vy *= 0.85;
-                                imgB.vx *= 0.85;
-                                imgB.vy *= 0.85;
-                                imgA.vRot *= 0.85;
-                                imgB.vRot *= 0.85;
+                                // 移除过强的“黏腻”摩擦力，改为极轻微的动能损耗，使其能顺滑地滚落
+                                imgA.vx *= 0.98;
+                                imgA.vy *= 0.98;
+                                imgB.vx *= 0.98;
+                                imgB.vy *= 0.98;
+                                imgA.vRot *= 0.98;
+                                imgB.vRot *= 0.98;
                             }
                         }
                     }
@@ -1304,14 +1314,14 @@
                         data.y = screenHeight - maxOffsetY;
                         
                         // 只有下落速度足够快时才会反弹，否则直接贴地（防止反复微弱弹跳造成的顿挫）
-                        if (data.vy > 2.0) {
+                        if (data.vy > 1.5) {
                             data.vy = -Math.abs(data.vy) * physicsConfig.bounce;
                         } else {
                             data.vy = 0;
                         }
                         
-                        data.vx *= 0.5; // 强力的触地摩擦力，防止在底部溜冰
-                        data.vRot *= 0.5; // 强力的触地角摩擦力，防止倒地后一直打转
+                        data.vx *= 0.8; // 减轻触地摩擦力，允许在地面自然滑行一段距离
+                        data.vRot *= 0.85; // 减轻触地角摩擦，落地时可以像球一样翻滚
                     }
                     
                     // 天花板碰撞 (防止被设备重力甩出屏幕上方)
