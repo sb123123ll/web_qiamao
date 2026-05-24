@@ -80,6 +80,18 @@
             opacity: 1;
         }
         
+        .heart-icon {
+            display: inline-block;
+            width: 1.2em;
+            height: 1.2em;
+            background-image: url('37.jpg');
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            vertical-align: text-bottom;
+            margin: 0 2px;
+        }
+        
         .welcome-dynamic-island {
             position: fixed;
             top: 20px;
@@ -747,11 +759,42 @@
             }
         }
         
+        /* 两侧动图装饰 */
+        .side-mascot {
+            position: fixed;
+            top: 50%;
+            width: 180px;
+            max-width: 18vw;
+            z-index: 500;
+            pointer-events: none; /* 防止遮挡后面的点击事件 */
+            opacity: 0;
+            animation: slideUpFadeIn 1.5s cubic-bezier(0.18, 0.89, 0.32, 1.28) 2.5s forwards;
+        }
+        .left-mascot {
+            left: 20px;
+            transform: translateY(-50%) scaleX(-1); /* 垂直居中并水平镜像 */
+        }
+        .right-mascot {
+            right: 20px;
+            transform: translateY(-50%); /* 垂直居中 */
+        }
+
+        @media (max-width: 1100px) {
+            .side-mascot {
+                width: 120px;
+            }
+        }
+        @media (max-width: 850px) {
+            .side-mascot {
+                display: none; /* 屏幕过小时隐藏动图，防止遮挡中间的主体内容 */
+            }
+        }
+
         /* 闲时漂浮动画性能优化 */
         .container, .settings-button, .email-info, .right-bottom-container,
         .qq-group-golden-wrapper, .pcl2-download-link, .friend-server-link,
         .mystery-game-link, .special-thanks-button, .bilibili-button,
-        .welcome-dynamic-island {
+        .welcome-dynamic-island, .side-mascot {
             will-change: transform, translate, rotate;
         }
     </style>
@@ -761,8 +804,12 @@
         <div class="bg-frame" id="bgFrame"></div>
     </div>
     
+    <!-- 左右两侧吉祥物动图 -->
+    <img src="pd-image.gif" class="side-mascot left-mascot" alt="Left Mascot">
+    <img src="pd-image.gif" class="side-mascot right-mascot" alt="Right Mascot">
+    
     <div class="welcome-dynamic-island" id="welcomeDynamicIsland">
-        欢迎来到半熟土豆——1.12.2模组服网站❤️❤️❤️
+        欢迎来到半熟土豆——1.12.2模组服网站<span class="heart-icon"></span><span class="heart-icon"></span><span class="heart-icon"></span>
     </div>
     
     <button class="settings-button" id="settingsButton">图标下雨效果设置</button>
@@ -788,6 +835,14 @@
             </label>
         </div>
         
+        <div class="physics-toggle-container" style="margin-top: 0;">
+            <span class="physics-toggle-label">启用图标下雨效果</span>
+            <label class="physics-toggle">
+                <input type="checkbox" id="rainToggle" checked>
+                <span class="physics-slider"></span>
+            </label>
+        </div>
+        
         <p style="font-size: 12px; color: #999; text-align: center; margin-top: 15px;">
             ⚠️注意：高密度设置可能影响页面性能，请根据设备性能选择⚠️
         </p>
@@ -797,7 +852,7 @@
     </div>
     
     <div class="container">
-        <h1>❤️❤️欢迎来到半熟土豆——1.12.2模组服的主页❤️❤️</h1>
+        <h1><span class="heart-icon" style="width: 1em; height: 1em;"></span><span class="heart-icon" style="width: 1em; height: 1em;"></span>欢迎来到半熟土豆——1.12.2模组服的主页<span class="heart-icon" style="width: 1em; height: 1em;"></span><span class="heart-icon" style="width: 1em; height: 1em;"></span></h1>
         <p>😇本服务器是Minecraft1.12.2模组服务器</p>
         <p>👉复制群号973937570或点击蓝色按钮自动跳转</p>
         <p>💀你也可以点击按钮进入友服qq群（已关服，静待复活💀💀💀）</p>
@@ -831,7 +886,7 @@
         
         <a href="https://space.bilibili.com/651371142" class="bilibili-button" target="_blank">
             <span class="bilibili-icon"></span>
-            ❤️腐竹的B站账号❤️
+            <span class="heart-icon"></span>腐竹的B站账号<span class="heart-icon"></span>
         </a>
     </div>
 
@@ -851,7 +906,7 @@
             });
         });
 
-        const totalImages = 36;
+        const totalImages = 37;
         const fallSpeedMin = 3;
         const fallSpeedMax = 8;
         const spinSpeedMin = -2;
@@ -1683,7 +1738,8 @@
                 .mystery-game-link,
                 .special-thanks-button,
                 .bilibili-button,
-                .welcome-dynamic-island
+                .welcome-dynamic-island,
+                .side-mascot
             `);
             
             const startTime = performance.now();
@@ -1743,6 +1799,7 @@
             const closeButton = document.getElementById('closeButton');
             const intensityOptions = document.querySelectorAll('.rain-intensity-option');
             const physicsToggle = document.getElementById('physicsToggle');
+            const rainToggle = document.getElementById('rainToggle');
             
             settingsButton.addEventListener('click', function() {
                 settingsPanel.style.display = 'block';
@@ -1771,6 +1828,17 @@
             if (physicsToggle) {
                 physicsToggle.addEventListener('change', function() {
                     togglePhysics(this.checked);
+                });
+            }
+            
+            if (rainToggle) {
+                rainToggle.addEventListener('change', function() {
+                    rainEnabled = this.checked;
+                    if (rainEnabled) {
+                        startRaining();
+                    } else {
+                        stopRaining();
+                    }
                 });
             }
             
