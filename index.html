@@ -772,7 +772,8 @@
         }
         .left-mascot {
             left: 20px;
-            transform: translateY(-50%) scaleX(-1); /* 垂直居中并水平镜像 */
+            transform: translateY(-50%); /* 垂直居中 */
+            scale: -1 1; /* 独立属性：水平镜像翻转，绝不被覆盖 */
         }
         .right-mascot {
             right: 20px;
